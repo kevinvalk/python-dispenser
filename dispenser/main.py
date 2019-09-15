@@ -34,7 +34,14 @@ PIN_MOTOR = 18
 MOTOR_ON = 70
 MOTOR_OFF = 0
 
-AREA = 'green'
+AREA = None
+with open('/boot/area', 'r') as f:
+	AREA = f.readline().strip(' \r\n')
+
+if AREA is None:
+	logger.fatal('No area given')
+	exit(-1);
+logger.info(f'Dispenser for area {AREA}')
 
 
 READ_GRACE = timedelta(seconds=3)
@@ -65,6 +72,8 @@ class Dispenser(JobRunner):
 	motor_speed = MOTOR_OFF
 	is_recovery = False
 	is_closed = False
+	previous_ir_state = None
+	previous_edge_time = None
 
 	def __init__(self, **kwargs):
 
@@ -101,41 +110,58 @@ class Dispenser(JobRunner):
 		self.area_ref = db.collection('areas').document(AREA)
 		self.doc_watch = self.area_ref.on_snapshot(self.on_area_update)
 
+	@Job(minutes = 1)
+	def job_check_watch(self):
+		# Check if our watch is closed
+		if self.doc_watch._closed:
+			self.doc_watch = self.area_ref.on_snapshot(self.on_area_update)
+			logger.warning('Restarting area watch')
+
 
 	# Create a callback on_snapshot function to capture changes
 	def on_area_update(self, snapshot, changes, read_time):
-		for doc in snapshot:
-			# print('Received document snapshot: {}'.format(doc.id))
-			logger.debug('Updating from firestore')
-			data = doc.to_dict()
+		try:
+			for doc in snapshot:
+				# print('Received document snapshot: {}'.format(doc.id))
+				logger.debug('Updating from firestore')
+				data = doc.to_dict()
 
-			# Update our area
-			self.game['tick_seconds'] = timedelta(seconds=data['tick_seconds'])
-			self.job_game_tick.job.update(seconds = data['tick_seconds'] // 4)
+				# Update our area
+				if 'tick_seconds' not in data:
+					data['tick_seconds'] = 300
 
-			remote_uids = set()
+				if 'limit' not in data:
+					data['limit'] = 25
 
-			# Update our players
-			for uid, player in data['players'].items():
-				remote_uids.add(uid)
+				self.game['tick_seconds'] = timedelta(seconds=data['tick_seconds'])
+				self.game['limit'] = data['limit']
+				self.job_game_tick.job.update(seconds = data['tick_seconds'] // 4)
 
-				# Make sure dictionary exists
-				if uid not in self.players:
-					tick = datetime.now(timezone.utc)
-					self.players[uid] = {
-						'last_read': tick,
-						'tick': tick,
-						'credit': 0,
-						'present': False,
-					}
+				remote_uids = set()
 
-				# Update any changed value
-				self.players[uid].update(player)
+				# Update our players
+				for uid, player in data['players'].items():
+					remote_uids.add(uid)
 
-			# Delete any player that is not on the remote
-			for uid in set(self.players.keys()) - remote_uids:
-				logger.info(f'Removing local {uid}')
-				del self.players[uid]
+					# Make sure dictionary exists
+					if uid not in self.players:
+						tick = datetime.now(timezone.utc)
+						self.players[uid] = {
+							'last_read': tick,
+							'tick': tick,
+							'credit': 0,
+							'present': False,
+						}
+
+					# Update any changed value
+					self.players[uid].update(player)
+
+				# Delete any player that is not on the remote
+				for uid in set(self.players.keys()) - remote_uids:
+					logger.info(f'Removing local {uid}')
+					del self.players[uid]
+		except Exception as e:
+			logger.exception('Exception in handling area update')
 
 	def close(self):
 		if self.is_closed:
@@ -157,7 +183,7 @@ class Dispenser(JobRunner):
 
 	def align_rotor(self):
 		self.is_calibrating = True
-		self.previous_edge_time = datetime.now(timezone.utc)
+		self.previous_edge_time = None
 		self.set_motor(MOTOR_ON)
 
 
@@ -181,10 +207,6 @@ class Dispenser(JobRunner):
 
 		self.previous_dispense_no = self.current_dispense_no
 
-
-	pattern_step = -1
-	previous_ir_state = None
-	previous_edge_time = None
 	@Job(milliseconds = 5, align = False)
 	def job_check_rotor(self):
 		# We only check if we are aligning or dispensing
@@ -194,6 +216,7 @@ class Dispenser(JobRunner):
 		# Initialize
 		if self.previous_ir_state is None:
 			self.previous_ir_state = self.get_ir()
+		if self.previous_edge_time is None:
 			self.previous_edge_time = datetime.now(timezone.utc)
 
 		# We read 10 time with 1 us sleep and get the one that happens the most
@@ -226,6 +249,8 @@ class Dispenser(JobRunner):
 
 			# Check if in small window
 			if self.dispense_no > 0 and elapsed > T_DETECT_EMPTY_S and elapsed < T_DETECT_EMPTY_B:
+				logger.error('We are empty!')
+
 				# Raise a flag that we are empty
 				self.game['is_empty'] = True
 
@@ -235,6 +260,7 @@ class Dispenser(JobRunner):
 				player_info['present'] = True
 				self.area_ref.set({
 					'is_empty': self.game['is_empty'],
+					'paid': firestore.Increment(-self.current_dispense_no),
 					'players': self.player_snapshot
 				}, merge = True)
 
@@ -252,7 +278,7 @@ class Dispenser(JobRunner):
 
 		if self.dispense_no > 0:
 			self.current_dispense_no += 1
-			logger.debug(f'Dispensed {self.current_dispense_no:d}')
+			logger.info(f'Dispensed {self.current_dispense_no:d}')
 			if self.current_dispense_no >= self.dispense_no:
 				self.dispense_done()
 
@@ -268,9 +294,13 @@ class Dispenser(JobRunner):
 			if not player['present']:
 				continue
 
+			# We artificially limit max credits
+			if player['credit'] >= self.game['limit']:
+				continue
+
 			# Check for update
 			if tick > player['tick'] + self.game['tick_seconds']:
-				logger.debug(f'Give money to {uid}')
+				logger.info(f'Give money to {uid}')
 
 				# Make sure we keep their checkin alignment
 				while tick > player['tick'] + self.game['tick_seconds']:
@@ -327,7 +357,7 @@ class Dispenser(JobRunner):
 
 	# Helper functions
 	def player_checkin(self, uid):
-		logger.debug(f'Checkin for {uid}')
+		logger.info(f'Checkin for {uid}')
 		self.set_led_flash('reader', 10, 0.05, HIGH)
 
 		# Update player
@@ -337,14 +367,15 @@ class Dispenser(JobRunner):
 					'present': True,
 					'checkin': firestore.SERVER_TIMESTAMP,
 					'tick': firestore.SERVER_TIMESTAMP,
+					'credit': firestore.Increment(0),
 				}
 			}
 		}, merge = True)
 
 
 	def player_checkout(self, uid):
-		logger.debug(f'Checkout for {uid}')
-		self.set_led_flash('reader', 0, 4, HIGH)
+		logger.info(f'Checkout for {uid}')
+		self.set_led_flash('reader', 0, 4, LOW)
 
 		self.dispense(self.players[uid]['credit'])
 
@@ -352,6 +383,7 @@ class Dispenser(JobRunner):
 		self.player_snapshot = {uid: self.players[uid]}
 		self.game['is_empty'] = False
 		self.area_ref.update({
+			'paid': firestore.Increment(self.players[uid]['credit']),
 			'is_empty': self.game['is_empty'],
 			f'players.{uid}': firestore.DELETE_FIELD,
 		})
@@ -380,7 +412,7 @@ class Dispenser(JobRunner):
 		self.dispense_no = amount
 		self.current_dispense_no = 0
 		self.previous_dispense_no = None
-		self.previous_edge_time = datetime.now(timezone.utc)
+		self.previous_edge_time = None
 
 		# Start the motor
 		self.set_motor(MOTOR_ON)
@@ -388,8 +420,10 @@ class Dispenser(JobRunner):
 
 	def dispense_done(self):
 		# Cleanup and turnoff the LED
-		self.set_motor(MOTOR_OFF)
+		# By going a bit longer, we always make a nice half turn
+		JobOnce(lambda: self.set_motor(MOTOR_OFF), milliseconds = 100)
 		JobOnce(lambda: self.set_led('holder', LOW), seconds = 3)
+		JobOnce(lambda: self.set_led('reader', HIGH), seconds = 3)
 		self.dispense_no = 0
 
 	def set_led_flash(self, led : str, amount : int, seconds : int, end_value : int, value : int = LOW):

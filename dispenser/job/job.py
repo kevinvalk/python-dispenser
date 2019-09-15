@@ -119,9 +119,9 @@ class JobRunner():
 						if job['interval'] is None:
 							job['disabled'] = has_disabled = True
 
-				# We run our loop every ms.
+				# We run our loop every 1/10 ms.
 				# This enables us to not to exhaust the CPU!
-				time.sleep(1 / 1000)
+				time.sleep(1 / 10000)
 
 				# Remove any disabled jobs
 				if has_disabled:

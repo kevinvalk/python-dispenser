@@ -19,8 +19,6 @@ setuptools.setup(
 	install_requires              = [
 		'wiringpi',
 		'firebase-admin',
-		'spidev',
-		'RPi.GPIO',
 		'pi-rc522 @ git+https://github.com/kevinvalk/pi-rc522.git',
 	],
 	license                       = 'BSD 3-Clause Clear License',
