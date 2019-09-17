@@ -176,7 +176,7 @@ class Dispenser(JobRunner):
 		except Exception as e:
 			logger.exception('Exception in handling area update')
 
-	def close(self):
+	def close(self, *args):
 		if self.is_closed:
 			return
 		self.is_closed = True
