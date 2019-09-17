@@ -1,12 +1,10 @@
 #!/usr/bin/python3
-
+import time
+import dispenser
 import pirc522
 import wiringpi
+import signal
 from wiringpi import HIGH, LOW
-
-from google.cloud import firestore
-
-import time
 from functools import partial
 from datetime import timedelta, datetime, timezone
 from dispenser.job import Job, JobOnce, JobRunner
@@ -16,10 +14,6 @@ logFormatter = '%(asctime)s - %(levelname)s - %(message)s'
 logging.basicConfig(
 	format=logFormatter,
 	level=logging.INFO
-	# handlers=[
-	# 	logging.FileHandler("run.log"),
-	# 	logging.StreamHandler(),
-	# ]
 )
 logger = logging.getLogger(__name__)
 
@@ -56,12 +50,6 @@ T_DETECT_EMPTY_B = T_DETECT_EMPTY * (1 + PERCENTAGE_EMPTY / 100)
 
 
 logger.debug(f'Range EMPTY {T_DETECT_EMPTY_S} - {T_DETECT_EMPTY_B}')
-
-db = firestore.Client.from_service_account_json('/boot/firebase-credentials.json')
-
-
-
-# TODO: Synchronize local players with remote tracked players on boot!
 
 class Dispenser(JobRunner):
 	# All variables
@@ -106,8 +94,18 @@ class Dispenser(JobRunner):
 
 		self.align_rotor()
 
-		# Now subscribe to updates on the DB
-		self.area_ref = db.collection('areas').document(AREA)
+		# Firestore is an expensive import, so we do it here
+		from google.cloud import firestore
+
+		self.db = firestore.Client.from_service_account_json('/boot/firebase-credentials.json')
+		self.area_ref = self.db.collection('areas').document(AREA)
+
+		# We set our version
+		self.area_ref.set({
+			'version': dispenser.__version__,
+		}, merge = True)
+
+		# Add the watch
 		self.doc_watch = self.area_ref.on_snapshot(self.on_area_update)
 
 	@Job(minutes = 1)
@@ -125,6 +123,21 @@ class Dispenser(JobRunner):
 				# print('Received document snapshot: {}'.format(doc.id))
 				logger.debug('Updating from firestore')
 				data = doc.to_dict()
+
+				# Check if we have to update
+				if 'is_update' in data and data['is_update'] == True:
+					# Set the is_update to false
+					self.area_ref.set({
+						'is_update': False,
+					}, merge = True)
+
+					# Trigger self update
+					self_update()
+
+					# This should inform systemd to send restart to us
+					# we should handle that signal and restart gracefully :)
+
+					return
 
 				# Update our area
 				if 'tick_seconds' not in data:
@@ -167,6 +180,9 @@ class Dispenser(JobRunner):
 		if self.is_closed:
 			return
 		self.is_closed = True
+		self.stop()
+
+		logger.info('Closing dispenser')
 
 		# Turnoff LEDs
 		for name, pin in LEDS.items():
@@ -421,7 +437,7 @@ class Dispenser(JobRunner):
 	def dispense_done(self):
 		# Cleanup and turnoff the LED
 		# By going a bit longer, we always make a nice half turn
-		JobOnce(lambda: self.set_motor(MOTOR_OFF), milliseconds = 100)
+		self.set_motor(MOTOR_OFF)
 		JobOnce(lambda: self.set_led('holder', LOW), seconds = 3)
 		JobOnce(lambda: self.set_led('reader', HIGH), seconds = 3)
 		self.dispense_no = 0
@@ -440,10 +456,33 @@ def main():
 	# Perform all our setup
 	dispenser = Dispenser()
 
+	# Add handlers for closing
+	signal.signal(signal.SIGINT, dispenser.close)
+	signal.signal(signal.SIGTERM, dispenser.close)
+
 	# Start main loop
 	dispenser.loop()
 
 	dispenser.close()
 
+def self_update():
+	import subprocess
+
+	logger.info('Updating installed package')
+	subprocess.Popen(['pip3', 'install', '-U', 'git+https://github.com/kevinvalk/python-dispenser.git']).wait()
+
+	logger.info('Rebooting the dispenser')
+	subprocess.Popen(['systemctl', 'restart', 'dispenser']).wait()
+
+	logger.info('Self update done')
+
 if __name__ == '__main__':
-	main()
+	import argparse
+	parser = argparse.ArgumentParser()
+	parser.add_argument('--update', action='store_true', help='Updates the dispenser')
+	args = parser.parse_args()
+
+	if args.update:
+		self_update()
+	else:
+		main()

@@ -75,15 +75,24 @@ class JobOnce(Job):
 		jobs.append(self.job)
 
 class JobRunner():
+	is_running = True
+
+	def stop(self):
+		self.is_running = False
+
 	def loop(self):
 		global jobs
 
 		try:
-			while True:
+			while self.is_running:
 				has_disabled = False
 				tick = datetime.now()
 
 				for job in jobs:
+					# Make sure to stop as soon as we are not running
+					if not self.is_running:
+						break
+
 					# Skip disabled
 					if job['disabled']:
 						has_disabled = True
