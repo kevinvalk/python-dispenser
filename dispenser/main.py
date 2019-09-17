@@ -35,7 +35,7 @@ with open('/boot/area', 'r') as f:
 if AREA is None:
 	logger.fatal('No area given')
 	exit(-1);
-logger.info(f'Dispenser for area {AREA}')
+logger.info(f'Dispenser v{dispenser.__version__} for area {AREA}')
 
 
 READ_GRACE = timedelta(seconds=3)
@@ -92,8 +92,6 @@ class Dispenser(JobRunner):
 			'is_empty': False,
 		}
 
-		self.align_rotor()
-
 		# Firestore is an expensive import, so we do it here
 		from google.cloud import firestore
 
@@ -107,6 +105,9 @@ class Dispenser(JobRunner):
 
 		# Add the watch
 		self.doc_watch = self.area_ref.on_snapshot(self.on_area_update)
+
+		# Finally start alignment
+		self.align_rotor()
 
 	@Job(minutes = 1)
 	def job_check_watch(self):
