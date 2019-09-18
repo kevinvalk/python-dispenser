@@ -65,6 +65,10 @@ class Dispenser(JobRunner):
 	previous_ir_state = None
 	previous_edge_time = None
 
+	# Different watches
+	watch_area = None
+	watch_players = None
+
 	def __init__(self, **kwargs):
 
 		# Setup all required hardware
@@ -90,22 +94,24 @@ class Dispenser(JobRunner):
 
 		# Setup initial state
 		self.players = {}
+		self.player_details = {}
 		self.game = {
 			'is_empty': False,
 		}
 
 
-
+		# Setup Firestore
 		self.db = firestore.Client.from_service_account_json('/boot/firebase-credentials.json')
 		self.area_ref = self.db.collection('areas').document(AREA)
+		self.player_ref = self.db.collection('players')
 
 		# We set our version
 		self.area_ref.set({
 			'version': dispenser.__version__,
 		}, merge = True)
 
-		# Add the watch
-		self.doc_watch = self.area_ref.on_snapshot(self.on_area_update)
+		# Add our watches
+		self.job_check_watch()
 
 		# Finally start alignment
 		self.align_rotor()
@@ -113,17 +119,32 @@ class Dispenser(JobRunner):
 	@Job(minutes = 1)
 	def job_check_watch(self):
 		# Check if our watch is closed
-		if self.doc_watch._closed:
-			self.doc_watch = self.area_ref.on_snapshot(self.on_area_update)
+		if self.watch_area is None or self.watch_area._closed:
+			self.watch_area = self.area_ref.on_snapshot(self.on_area_update)
 			logger.warning('Restarting area watch')
 
+		# Check if our watch is closed
+		if self.watch_players is None or self.watch_players._closed:
+			self.watch_players = self.player_ref.on_snapshot(self.on_players_update)
+			logger.warning('Restarting players watch')
+
+	# Create a callback on_snapshot function to capture changes
+	def on_players_update(self, snapshot, changes, read_time):
+		try:
+			for change in changes:
+				if change.type.name == 'ADDED':
+					self.player_details[change.document.id] = change.document.to_dict()
+				elif change.type.name == 'MODIFIED':
+					self.player_details[change.document.id] = change.document.to_dict()
+				elif change.type.name == 'REMOVED':
+					del self.player_details[change.document.id]
+		except Exception as e:
+			logger.exception('Exception in handling players update')
 
 	# Create a callback on_snapshot function to capture changes
 	def on_area_update(self, snapshot, changes, read_time):
 		try:
 			for doc in snapshot:
-				# print('Received document snapshot: {}'.format(doc.id))
-				logger.debug('Updating from firestore')
 				data = doc.to_dict()
 
 				# Check if we have to update
@@ -138,7 +159,6 @@ class Dispenser(JobRunner):
 
 					# This should inform systemd to send restart to us
 					# we should handle that signal and restart gracefully :)
-
 					return
 
 				# Update our area
@@ -225,7 +245,7 @@ class Dispenser(JobRunner):
 
 		self.previous_dispense_no = self.current_dispense_no
 
-	@Job(milliseconds = 5, align = False)
+	@Job(milliseconds = 5)
 	def job_check_rotor(self):
 		# We only check if we are aligning or dispensing
 		if self.dispense_no <= 0 and not self.is_calibrating and not self.is_recovery:
@@ -301,7 +321,7 @@ class Dispenser(JobRunner):
 				self.dispense_done()
 
 
-	@Job(seconds = 30, align = False)
+	@Job(seconds = 30)
 	def job_game_tick(self):
 		tick = datetime.now(timezone.utc)
 
@@ -309,7 +329,7 @@ class Dispenser(JobRunner):
 		updates = {}
 		for uid, player in self.players.items():
 			# Skip players that are not present
-			if not player['present']:
+			if player['present'] != True:
 				continue
 
 			# We artificially limit max credits
@@ -337,7 +357,7 @@ class Dispenser(JobRunner):
 			}, merge = True)
 
 
-	@Job(milliseconds = 350, align = True)
+	@Job(milliseconds = 500)
 	def job_read_tag(self):
 		# Do not read tags if we are going
 		if self.motor_speed != MOTOR_OFF:
@@ -352,6 +372,12 @@ class Dispenser(JobRunner):
 
 		# We only use string UIDS padded to 14 digits
 		uid = f'{uid:014X}'
+
+		# Check if this UID is a valid player
+		if uid not in self.player_details:
+			logger.error(f'Unknown tag checking in for {uid}')
+			self.set_led_flash('reader', 4, 0.01, HIGH)
+			return
 
 		# We got a TAG
 		if not uid in self.players:
@@ -378,11 +404,28 @@ class Dispenser(JobRunner):
 		logger.info(f'Checkin for {uid}')
 		self.set_led_flash('reader', 10, 0.05, HIGH)
 
-		# Update player
+		# Checkout this person if in another area
+		if 'area' in self.player_details[uid] and self.player_details[uid]['area'] is not None:
+			self.db.collection('areas').document(self.player_details[uid]['area']).set({
+				'players': {
+					uid: {
+						'present': False,
+					}
+				}
+			}, merge = True)
+
+
+
+		# Update player and area
+		self.player_ref.document(uid).set({
+			'area': AREA,
+		}, merge = True)
+
 		self.area_ref.set({
 			'players': {
 				uid: {
 					'present': True,
+					'name': self.player_details[uid]['name'],
 					'checkin': firestore.SERVER_TIMESTAMP,
 					'tick': firestore.SERVER_TIMESTAMP,
 					'credit': firestore.Increment(0),
@@ -393,13 +436,24 @@ class Dispenser(JobRunner):
 
 	def player_checkout(self, uid):
 		logger.info(f'Checkout for {uid}')
-		self.set_led_flash('reader', 0, 4, LOW)
 
-		self.dispense(self.players[uid]['credit'])
+		# Prevent any possible collision here
+		if uid not in self.players:
+			return
+
+		if self.players[uid]['credit'] <= 0:
+			self.set_led_flash('reader', 10, 0.05, HIGH)
+		else:
+			self.dispense(self.players[uid]['credit'])
 
 		# Remove player
 		self.player_snapshot = {uid: self.players[uid]}
 		self.game['is_empty'] = False
+
+		self.player_ref.document(uid).set({
+			'area': None,
+		}, merge = True)
+
 		self.area_ref.update({
 			'paid': firestore.Increment(self.players[uid]['credit']),
 			'is_empty': self.game['is_empty'],
@@ -434,6 +488,7 @@ class Dispenser(JobRunner):
 
 		# Start the motor
 		self.set_motor(MOTOR_ON)
+		self.set_led('reader', LOW)
 		self.set_led('holder', HIGH)
 
 	def dispense_done(self):
@@ -463,9 +518,10 @@ def main():
 	signal.signal(signal.SIGTERM, dispenser.close)
 
 	# Start main loop
-	dispenser.loop()
-
-	dispenser.close()
+	try:
+		dispenser.loop()
+	finally:
+		dispenser.close()
 
 def self_update():
 	import subprocess
