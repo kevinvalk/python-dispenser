@@ -4,12 +4,14 @@ import dispenser
 import pirc522
 import wiringpi
 import signal
+import logging
 from wiringpi import HIGH, LOW
 from functools import partial
 from datetime import timedelta, datetime, timezone
 from dispenser.job import Job, JobOnce, JobRunner
+from google.cloud import firestore
 
-import logging
+
 logFormatter = '%(asctime)s - %(levelname)s - %(message)s'
 logging.basicConfig(
 	format=logFormatter,
@@ -92,8 +94,7 @@ class Dispenser(JobRunner):
 			'is_empty': False,
 		}
 
-		# Firestore is an expensive import, so we do it here
-		from google.cloud import firestore
+
 
 		self.db = firestore.Client.from_service_account_json('/boot/firebase-credentials.json')
 		self.area_ref = self.db.collection('areas').document(AREA)
