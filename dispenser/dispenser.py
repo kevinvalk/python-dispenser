@@ -19,17 +19,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# PIN config
-LEDS = {
-	'holder': 17,
-	'reader': 24,
-	'ir': 4,
-}
-PIN_IR_RX = 7
-PIN_MOTOR = 18
-MOTOR_ON = 70
-MOTOR_OFF = 0
-
+# Load our area
 AREA = None
 with open('/boot/area', 'r') as f:
 	AREA = f.readline().strip(' \r\n')
@@ -39,19 +29,24 @@ if AREA is None:
 	exit(-1);
 logger.info(f'Dispenser v{dispenser.__version__} for area {AREA}')
 
+# PIN config
+LEDS = {
+	'holder': 17,
+	'reader': 24,
+	'ir': 4,
+}
+PIN_IR_RX = 7
+PIN_MOTOR = 18
+MOTOR_ON = 100
+MOTOR_REVERSE = 200
+
+# Motor on blue uses different algorithm for turning off...
+MOTOR_OFF = 0 if AREA == 'blue' else 150
 
 READ_GRACE = timedelta(seconds=3)
 
-PERCENTAGE_EMPTY = 20
-T_DETECT_EMPTY = timedelta(milliseconds=310)
-T_DETECT_BIG = timedelta(milliseconds=340)
-
-# Calc
-T_DETECT_EMPTY_S = T_DETECT_EMPTY * (1 - PERCENTAGE_EMPTY / 100)
-T_DETECT_EMPTY_B = T_DETECT_EMPTY * (1 + PERCENTAGE_EMPTY / 100)
-
-
-logger.debug(f'Range EMPTY {T_DETECT_EMPTY_S} - {T_DETECT_EMPTY_B}')
+T_DETECT_BIG = timedelta(milliseconds=200)
+T_DETECT_SMALL = timedelta(milliseconds=100)
 
 def get_ip():
 	s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -74,7 +69,7 @@ class Dispenser(JobRunner):
 	motor_speed = MOTOR_OFF
 	is_recovery = False
 	is_closed = False
-	previous_ir_state = None
+	previous_ir_state = 0
 	previous_edge_time = None
 
 	# Different watches
@@ -127,6 +122,7 @@ class Dispenser(JobRunner):
 			'version': dispenser.__version__,
 			'is_update': False,
 			'ip': get_ip(),
+			'is_align': False,
 		}, merge = True)
 
 		# Add our watches
@@ -162,9 +158,19 @@ class Dispenser(JobRunner):
 
 	# Create a callback on_snapshot function to capture changes
 	def on_area_update(self, snapshot, changes, read_time):
+		global MOTOR_ON
 		try:
 			for doc in snapshot:
 				data = doc.to_dict()
+
+				# Check for full shutdown
+				if 'is_align' in data and data['is_align'] == True:
+					self.area_ref.set({
+						'is_align': False,
+					}, merge = True)
+
+					self.align_rotor()
+					return
 
 				# Check for full shutdown
 				if 'is_shutdown' in data and data['is_shutdown'] == True:
@@ -196,6 +202,10 @@ class Dispenser(JobRunner):
 
 				if 'limit' not in data:
 					data['limit'] = 25
+
+				if 'motor_speed' in data:
+					# MOTOR_ON = data['motor_speed']
+					logger.info(f'Setting motor speed to {MOTOR_ON}')
 
 				self.game['tick_seconds'] = timedelta(seconds=data['tick_seconds'])
 				self.game['tick_amount'] = data['tick_amount']
@@ -254,6 +264,7 @@ class Dispenser(JobRunner):
 
 
 	def align_rotor(self):
+		logger.info('Aligning rotor')
 		self.is_calibrating = True
 		self.previous_edge_time = None
 		self.set_motor(MOTOR_ON)
@@ -273,35 +284,28 @@ class Dispenser(JobRunner):
 		if self.previous_dispense_no == self.current_dispense_no:
 			# Recovery mode
 			self.is_recovery = True
-			self.set_motor(200)
+			self.set_motor(MOTOR_REVERSE)
 			logger.error(f'Jam after {self.current_dispense_no} coins, recovering...')
-			JobOnce(self.recovery_done, seconds = 0.5)
+			JobOnce(self.recovery_done, seconds = 0.4)
 
 		self.previous_dispense_no = self.current_dispense_no
 
-	@Job(milliseconds = 5)
+	@Job(milliseconds = 1)
 	def job_check_rotor(self):
 		# We only check if we are aligning or dispensing
 		if self.dispense_no <= 0 and not self.is_calibrating and not self.is_recovery:
 			return
 
 		# Initialize
-		if self.previous_ir_state is None:
-			self.previous_ir_state = self.get_ir()
 		if self.previous_edge_time is None:
 			self.previous_edge_time = datetime.now(timezone.utc)
 
-		# We read 10 time with 1 us sleep and get the one that happens the most
-		states = []
-		for _ in range(0, 10):
-			states.append(self.get_ir())
-			time.sleep(1 / (1000 * 1000))
-		ir_state = HIGH if states.count(HIGH) > states.count(LOW) else LOW
+		ir_state = self.get_ir()
 
 		# Detect raising edge
 		if self.previous_ir_state == 0 and ir_state == 1:
 			elapsed = (datetime.now(timezone.utc) - self.previous_edge_time)
-			# logger.debug(f'Raising edge {elapsed}')
+			logger.warn(f'Raising edge {elapsed}')
 
 			self.previous_ir_state = 1
 			self.previous_edge_time = datetime.now(timezone.utc)
@@ -315,13 +319,13 @@ class Dispenser(JobRunner):
 		# Detect trailing edge
 		elif self.previous_ir_state == 1 and ir_state == 0:
 			elapsed = (datetime.now(timezone.utc) - self.previous_edge_time)
-			# logger.debug(f'Falling edge {elapsed}')
+			logger.warn(f'Falling edge {elapsed}')
 
 			self.previous_ir_state = 0
 			self.previous_edge_time = datetime.now(timezone.utc)
 
 			# If elapsed is in the slow window, the next coin will be empty
-			if elapsed > T_DETECT_EMPTY_S and elapsed < T_DETECT_EMPTY_B:
+			if elapsed > T_DETECT_SMALL:
 				self.is_coin_empty = True
 
 
@@ -477,12 +481,23 @@ class Dispenser(JobRunner):
 		self.players[uid]['present'] = False
 
 	def set_motor(self, speed: int):
-		logger.debug(f'Setting motor {speed:d}')
+		logger.info(f'Setting motor {speed:d}')
 		self.motor_speed = speed
+
+		# We reverse a bit
+		if speed == MOTOR_OFF:
+			wiringpi.pwmWrite(PIN_MOTOR, MOTOR_REVERSE)
+			time.sleep(0.3)
+
 		wiringpi.pwmWrite(PIN_MOTOR, speed)
 
 	def get_ir(self):
-		return wiringpi.digitalRead(PIN_IR_RX)
+		# We read 10 time with 1 us sleep and get the one that happens the most
+		states = []
+		for _ in range(0, 10):
+			states.append(wiringpi.digitalRead(PIN_IR_RX))
+			time.sleep(1 / (1000 * 1000))
+		return HIGH if states.count(HIGH) > states.count(LOW) else LOW
 
 	def set_led(self, led : str, value):
 		if led not in LEDS:
