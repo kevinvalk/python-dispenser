@@ -5,6 +5,7 @@ import pirc522
 import wiringpi
 import signal
 import logging
+import socket
 from wiringpi import HIGH, LOW
 from functools import partial
 from datetime import timedelta, datetime, timezone
@@ -53,6 +54,18 @@ T_DETECT_EMPTY_B = T_DETECT_EMPTY * (1 + PERCENTAGE_EMPTY / 100)
 
 logger.debug(f'Range EMPTY {T_DETECT_EMPTY_S} - {T_DETECT_EMPTY_B}')
 
+def get_ip():
+	s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+	try:
+		# doesn't even have to be reachable
+		s.connect(('10.255.255.255', 1))
+		ip = s.getsockname()[0]
+	except:
+		ip = '127.0.0.1'
+	finally:
+		s.close()
+	return ip
+
 class Dispenser(JobRunner):
 	# All variables
 	is_calibrating = False
@@ -68,6 +81,7 @@ class Dispenser(JobRunner):
 	# Different watches
 	watch_area = None
 	watch_players = None
+	is_updating = False
 
 	def __init__(self, **kwargs):
 
@@ -99,7 +113,6 @@ class Dispenser(JobRunner):
 			'is_empty': False,
 		}
 
-
 		# Setup Firestore
 		self.db = firestore.Client.from_service_account_json('/boot/firebase-credentials.json')
 		self.area_ref = self.db.collection('areas').document(AREA)
@@ -108,6 +121,8 @@ class Dispenser(JobRunner):
 		# We set our version
 		self.area_ref.set({
 			'version': dispenser.__version__,
+			'is_update': False,
+			'ip': get_ip(),
 		}, merge = True)
 
 		# Add our watches
@@ -148,11 +163,9 @@ class Dispenser(JobRunner):
 				data = doc.to_dict()
 
 				# Check if we have to update
-				if 'is_update' in data and data['is_update'] == True:
-					# Set the is_update to false
-					self.area_ref.set({
-						'is_update': False,
-					}, merge = True)
+				if not self.is_updating and 'is_update' in data and data['is_update'] == True:
+					# Remember that we are updating
+					self.is_updating = True
 
 					# Trigger self update
 					self_update()
@@ -165,31 +178,38 @@ class Dispenser(JobRunner):
 				if 'tick_seconds' not in data:
 					data['tick_seconds'] = 300
 
+				if 'tick_amount' not in data:
+					data['tick_amount'] = 1
+
 				if 'limit' not in data:
 					data['limit'] = 25
 
 				self.game['tick_seconds'] = timedelta(seconds=data['tick_seconds'])
+				self.game['tick_amount'] = data['tick_amount']
 				self.game['limit'] = data['limit']
 				self.job_game_tick.job.update(seconds = data['tick_seconds'] // 4)
+
+				logger.info(f'Game info, limit: {self.game["limit"]}, tick_seconds: {self.game["tick_seconds"]}, tick_amount: {self.game["tick_amount"]}')
 
 				remote_uids = set()
 
 				# Update our players
-				for uid, player in data['players'].items():
-					remote_uids.add(uid)
+				if 'player' in data and isinstance(data['players'], dict):
+					for uid, player in data['players'].items():
+						remote_uids.add(uid)
 
-					# Make sure dictionary exists
-					if uid not in self.players:
-						tick = datetime.now(timezone.utc)
-						self.players[uid] = {
-							'last_read': tick,
-							'tick': tick,
-							'credit': 0,
-							'present': False,
-						}
+						# Make sure dictionary exists
+						if uid not in self.players:
+							tick = datetime.now(timezone.utc)
+							self.players[uid] = {
+								'last_read': tick,
+								'tick': tick,
+								'credit': 0,
+								'present': False,
+							}
 
-					# Update any changed value
-					self.players[uid].update(player)
+						# Update any changed value
+						self.players[uid].update(player)
 
 				# Delete any player that is not on the remote
 				for uid in set(self.players.keys()) - remote_uids:
@@ -232,8 +252,8 @@ class Dispenser(JobRunner):
 	previous_dispense_no = None
 	@Job(seconds = 2)
 	def job_check_rotor_recovery(self):
-		# Check if we are dispensing
-		if self.dispense_no <= 0 and not self.is_calibrating:
+		# If we are calibrating or not dispensing, we are not doing anything
+		if self.dispense_no <= 0 or self.is_calibrating:
 			return
 
 		if self.previous_dispense_no == self.current_dispense_no:
@@ -346,7 +366,7 @@ class Dispenser(JobRunner):
 
 				# Update player
 				updates[uid] = {
-					'credit': firestore.Increment(1),
+					'credit': firestore.Increment(self.game['tick_amount']),
 					'tick': player['tick'],
 				}
 
