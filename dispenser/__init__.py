@@ -4,7 +4,7 @@ Riscure Inspector trace files.
 """
 
 name        = 'dispenser'
-__version__ = '0.4.2'
+__version__ = '0.4.3'
 __author__  = 'Kevin Valk'
 __contact__ =  'kevin@kevinvalk.nl'
 __all__     = [

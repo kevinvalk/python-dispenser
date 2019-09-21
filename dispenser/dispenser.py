@@ -355,7 +355,7 @@ class Dispenser(JobRunner):
 				continue
 
 			# We limit the credits to [0, limit]
-			new_credit = max(0, min(player['credit'] + self.game['tick_amount']))
+			new_credit = max(0, min(player['credit'] + self.game['tick_amount'], self.game['limit']))
 
 			# If there is no change, or if we have already more (and positive tick rate), continue
 			if player['credit'] == new_credit or (self.game['tick_amount'] > 0 and player['credit'] > new_credit):
