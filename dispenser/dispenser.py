@@ -428,7 +428,11 @@ class Dispenser(JobRunner):
 		self.set_led_flash('reader', 10, 0.05, HIGH)
 
 		# Checkout this person if in another area
-		if 'area' in self.player_details[uid] and self.player_details[uid]['area'] != AREA:
+		if (
+			'area' in self.player_details[uid] and
+			self.player_details[uid]['area'] is not None and
+			self.player_details[uid]['area'] != AREA
+			):
 			logger.info(f'Checking player out at {self.player_details[uid]["area"]}')
 			self.db.collection('areas').document(self.player_details[uid]['area']).set({
 				'players': {
@@ -437,8 +441,6 @@ class Dispenser(JobRunner):
 					}
 				}
 			}, merge = True)
-
-
 
 		# Update player and area
 		self.player_ref.document(uid).set({
