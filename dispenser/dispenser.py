@@ -300,7 +300,7 @@ class Dispenser(JobRunner):
 		# Detect raising edge
 		if self.previous_ir_state == 0 and ir_state == 1:
 			elapsed = (datetime.now(timezone.utc) - self.previous_edge_time)
-			logger.warn(f'Raising edge {elapsed}')
+			# logger.warn(f'Raising edge {elapsed}')
 
 			self.previous_ir_state = 1
 			self.previous_edge_time = datetime.now(timezone.utc)
@@ -314,7 +314,7 @@ class Dispenser(JobRunner):
 		# Detect trailing edge
 		elif self.previous_ir_state == 1 and ir_state == 0:
 			elapsed = (datetime.now(timezone.utc) - self.previous_edge_time)
-			logger.warn(f'Falling edge {elapsed}')
+			# logger.warn(f'Falling edge {elapsed}')
 
 			self.previous_ir_state = 0
 			self.previous_edge_time = datetime.now(timezone.utc)
@@ -354,8 +354,11 @@ class Dispenser(JobRunner):
 			if player['present'] != True:
 				continue
 
-			# We artificially limit max credits
-			if player['credit'] >= self.game['limit']:
+			# We limit the credits to [0, limit]
+			new_credit = max(0, min(player['credit'] + self.game['tick_amount']))
+
+			# If there is no change, or if we have already more (and positive tick rate), continue
+			if player['credit'] == new_credit or (self.game['tick_amount'] > 0 and player['credit'] > new_credit):
 				continue
 
 			# Check for update
@@ -368,7 +371,7 @@ class Dispenser(JobRunner):
 
 				# Update player
 				updates[uid] = {
-					'credit': firestore.Increment(self.game['tick_amount']),
+					'credit': firestore.Increment(new_credit - player['credit']),
 					'tick': player['tick'],
 				}
 
