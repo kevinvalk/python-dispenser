@@ -1,0 +1,118 @@
+---
+- hosts: all
+  become: yes
+  handlers:
+  - name: reboot dispenser
+    systemd:
+      name: dispenser
+      state: restarted
+
+  tasks:
+  - name: Adjusting boot config.txt
+    ini_file:
+      no_extra_spaces: yes # Required for Raspberry Pi
+      path: /boot/config.txt
+      section: '{{ item[0] }}'
+      option: '{{ item[1] }}'
+      value: '{{ item[2] }}'
+    loop:
+      - [null, dtparam=spi, 'on']
+      - [null, disable_overscan, '1']
+      - [null, force_turbo, '1']
+      - [all, gpu_mem, '256']
+    register: bootconfig
+
+  - name: Rebooting to finalize boot config.txt changes
+    reboot:
+    when: bootconfig.changed
+
+  - name: APT - Upgrade system
+    apt: upgrade=dist update_cache=true
+  - name: APT - Install packages
+    apt:
+      state: present
+      install_recommends: no
+      name:
+        # Common
+        - git
+        - rsync
+
+        # Kiosk
+        - xserver-xorg
+        - x11-xserver-utils
+        - xinit
+        - openbox
+        - chromium-browser
+
+        # Python3
+        - python3-pip
+        - python3-setuptools
+
+  - name: APT - Purging obsolete packages
+    apt: autoremove=yes purge=yes force=yes
+
+  # Check if we need reboot
+  - name: Check if reboot is required
+    stat: path=/var/run/reboot-required
+    register: reboot_required_file
+  - name: Running reboot
+    reboot:
+    when: reboot_required_file.stat.exists
+
+  # Enable auto boot
+  - name: Change raspi-config
+    shell: '{{ item }}'
+    loop:
+      - raspi-config nonint do_boot_behaviour B2
+      - raspi-config nonint do_change_timezone Europe/Amsterdam
+
+  # Kiosk
+  - name: Kiosk mode
+    template: src=templates/autostart dest=/etc/xdg/openbox/autostart
+    register: openbox
+  - name: Kiosk mode autostart
+    lineinfile:
+      path: /home/pi/.profile
+      line: '[[ -z $DISPLAY && $XDG_VTNR -eq 1 ]] && startx -- -nocursor'
+    register: profile
+
+
+  - name: Installing basic pip packages
+    pip:
+      executable: pip3
+      state: latest
+      name:
+        - wheel
+
+  - name: Installing dispenser
+    pip:
+      executable: pip3
+      state: latest
+      name:
+        - git+https://github.com/kevinvalk/python-dispenser.git
+    notify:
+      - reboot dispenser
+
+  - name: Copy service file
+    copy:
+      src: templates/dispenser.service
+      dest: /etc/systemd/system/dispenser.service
+      mode: '0644'
+
+  - name: Installing dispenser service
+    systemd:
+      name: dispenser
+      enabled: yes
+      masked: no
+      state: started
+
+  # Global reboot
+  - name: Rebooting to get X running
+    reboot:
+    when: openbox.changed or profile.changed
+
+  # Not used, use auto update feature
+  # - name: Installing dispenser service
+  #   synchronize:
+  #     src: '{{ playbook_dir }}/../dispenser/'
+  #     dest: /opt/dispenser/
