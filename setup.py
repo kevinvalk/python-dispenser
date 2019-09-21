@@ -35,7 +35,7 @@ setuptools.setup(
 	},
 	entry_points                  = {
 		'console_scripts': [
-			'dispenser = dispenser.main:main',
+			'dispenser = dispenser:main',
 		]
 	},
 )
