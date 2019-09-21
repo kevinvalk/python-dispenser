@@ -158,7 +158,6 @@ class Dispenser(JobRunner):
 
 	# Create a callback on_snapshot function to capture changes
 	def on_area_update(self, snapshot, changes, read_time):
-		global MOTOR_ON
 		try:
 			for doc in snapshot:
 				data = doc.to_dict()
@@ -202,10 +201,6 @@ class Dispenser(JobRunner):
 
 				if 'limit' not in data:
 					data['limit'] = 25
-
-				if 'motor_speed' in data:
-					# MOTOR_ON = data['motor_speed']
-					logger.info(f'Setting motor speed to {MOTOR_ON}')
 
 				self.game['tick_seconds'] = timedelta(seconds=data['tick_seconds'])
 				self.game['tick_amount'] = data['tick_amount']
