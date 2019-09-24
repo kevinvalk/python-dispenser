@@ -19,7 +19,7 @@
       - [null, dtparam=spi, 'on']
       - [null, disable_overscan, '1']
       - [null, force_turbo, '1']
-      - [all, gpu_mem, '256']
+      - [all, gpu_mem, '128']
     register: bootconfig
 
   - name: Rebooting to finalize boot config.txt changes
@@ -110,9 +110,3 @@
   - name: Rebooting to get X running
     reboot:
     when: openbox.changed or profile.changed
-
-  # Not used, use auto update feature
-  # - name: Installing dispenser service
-  #   synchronize:
-  #     src: '{{ playbook_dir }}/../dispenser/'
-  #     dest: /opt/dispenser/

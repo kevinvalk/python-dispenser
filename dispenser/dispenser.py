@@ -48,6 +48,8 @@ READ_GRACE = timedelta(seconds=3)
 T_DETECT_BIG = timedelta(milliseconds=200)
 T_DETECT_SMALL = timedelta(milliseconds=100)
 
+T_JAM = timedelta(seconds=2)
+
 def get_ip():
 	s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 	try:
@@ -71,6 +73,8 @@ class Dispenser(JobRunner):
 	is_closed = False
 	previous_ir_state = 0
 	previous_edge_time = None
+	last_dispense_time = None
+	empty_count = 0
 
 	# Different watches
 	watch_area = None
@@ -205,7 +209,7 @@ class Dispenser(JobRunner):
 				self.game['tick_seconds'] = timedelta(seconds=data['tick_seconds'])
 				self.game['tick_amount'] = data['tick_amount']
 				self.game['limit'] = data['limit']
-				self.job_game_tick.job.update(seconds = data['tick_seconds'] // 4)
+				# self.job_game_tick.job.update(seconds = data['tick_seconds'] // 4)
 
 				# logger.info(f'Game info, limit: {self.game["limit"]}, tick_seconds: {self.game["tick_seconds"]}, tick_amount: {self.game["tick_amount"]}')
 
@@ -269,23 +273,20 @@ class Dispenser(JobRunner):
 		self.dispense(self.dispense_no - self.current_dispense_no)
 		self.is_recovery = False
 
-	previous_dispense_no = None
-	@Job(seconds = 2)
+	@Job(seconds = 1, align = True)
 	def job_check_rotor_recovery(self):
 		# If we are calibrating or not dispensing, we are not doing anything
 		if self.dispense_no <= 0 or self.is_calibrating:
 			return
 
-		if self.previous_dispense_no == self.current_dispense_no:
+		if (datetime.now(timezone.utc) - last_dispense_time) > T_JAM:
 			# Recovery mode
 			self.is_recovery = True
 			self.set_motor(MOTOR_REVERSE)
 			logger.error(f'Jam after {self.current_dispense_no} coins, recovering...')
 			JobOnce(self.recovery_done, seconds = 0.4)
 
-		self.previous_dispense_no = self.current_dispense_no
-
-	@Job(milliseconds = 1)
+	@Job(milliseconds = 4, align = True)
 	def job_check_rotor(self):
 		# We only check if we are aligning or dispensing
 		if self.dispense_no <= 0 and not self.is_calibrating and not self.is_recovery:
@@ -328,6 +329,8 @@ class Dispenser(JobRunner):
 	def on_half_rotation(self, has_coin):
 		logger.info(f'Half rotation and coin presence is {has_coin}')
 
+		self.last_dispense_time = datetime.now(timezone.utc)
+
 		if self.is_calibrating:
 			self.is_calibrating = False
 			self.set_motor(MOTOR_OFF)
@@ -335,15 +338,19 @@ class Dispenser(JobRunner):
 
 		# If we are dispensing
 		if self.dispense_no > 0:
+			really_empty = False
 			if has_coin:
+				self.empty_count = 0
 				self.current_dispense_no += 1
+			else:
+				self.empty_count += 1
 
 			logger.info(f'Dispensed {self.current_dispense_no:d}')
-			if not has_coin or self.current_dispense_no >= self.dispense_no:
+			if self.empty_count >= 3 or self.current_dispense_no >= self.dispense_no:
 				self.dispense_done(self.current_dispense_no)
 
 
-	@Job(seconds = 30)
+	@Job(seconds = 15)
 	def job_game_tick(self):
 		tick = datetime.now(timezone.utc)
 
@@ -422,6 +429,8 @@ class Dispenser(JobRunner):
 				self.player_checkin(uid)
 			else:
 				self.player_checkout(uid)
+		else:
+			logger.info(f'User {uid} still in grace period')
 
 
 	# Helper functions
@@ -465,6 +474,7 @@ class Dispenser(JobRunner):
 	def player_checkout(self, uid):
 		# Prevent any possible collision here
 		if uid not in self.players:
+			logger.error('Checking out player that does not exists...')
 			return
 
 		logger.info(f'Checkout for {uid} with credit {self.players[uid]["credit"]}')
@@ -479,13 +489,12 @@ class Dispenser(JobRunner):
 		self.players[uid]['present'] = False
 
 	def set_motor(self, speed: int):
-		logger.info(f'Setting motor {speed:d}')
 		self.motor_speed = speed
 
-		# We reverse a bit
-		if speed == MOTOR_OFF:
-			wiringpi.pwmWrite(PIN_MOTOR, MOTOR_REVERSE)
-			time.sleep(0.3)
+		# # We reverse a bit
+		# if speed == MOTOR_OFF:
+		# 	wiringpi.pwmWrite(PIN_MOTOR, MOTOR_REVERSE)
+		# 	time.sleep(0.3)
 
 		wiringpi.pwmWrite(PIN_MOTOR, speed)
 
@@ -511,8 +520,8 @@ class Dispenser(JobRunner):
 
 		self.dispense_no = amount
 		self.current_dispense_no = 0
-		self.previous_dispense_no = None
 		self.previous_edge_time = None
+		self.last_dispense_time = datetime.now(timezone.utc)
 
 		# Start the motor
 		self.set_motor(MOTOR_ON)
@@ -556,6 +565,7 @@ class Dispenser(JobRunner):
 		# Finally, remove player from area
 		self.player_ref.document(self.current_uid).set({
 			'area': None,
+			AREA: firestore.Increment(amount),
 		}, merge = True)
 
 		# Our flag that we are not dispensing
