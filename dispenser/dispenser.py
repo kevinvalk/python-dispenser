@@ -279,7 +279,7 @@ class Dispenser(JobRunner):
 		if self.dispense_no <= 0 or self.is_calibrating:
 			return
 
-		if (datetime.now(timezone.utc) - last_dispense_time) > T_JAM:
+		if (datetime.now(timezone.utc) - self.last_dispense_time) > T_JAM:
 			# Recovery mode
 			self.is_recovery = True
 			self.set_motor(MOTOR_REVERSE)
@@ -341,9 +341,12 @@ class Dispenser(JobRunner):
 			really_empty = False
 			if has_coin:
 				self.empty_count = 0
-				self.current_dispense_no += 1
 			else:
 				self.empty_count += 1
+
+			# Normally, this would be in has_coin, but has_coin algorithm is currently
+			# not reliably enough...
+			self.current_dispense_no += 1
 
 			logger.info(f'Dispensed {self.current_dispense_no:d}')
 			if self.empty_count >= 3 or self.current_dispense_no >= self.dispense_no:
