@@ -270,13 +270,19 @@ class Dispenser(JobRunner):
 
 
 	def recovery_done(self):
-		self.dispense(self.dispense_no - self.current_dispense_no)
+		c = self.current_dispense_no
+
+		# Dispense the same amount
+		self.dispense(self.dispense_no)
+
+		# But jump forward in the amount currently dispensed ;)
+		self.current_dispense_no = c
 		self.is_recovery = False
 
 	@Job(seconds = 1, align = True)
 	def job_check_rotor_recovery(self):
-		# If we are calibrating or not dispensing, we are not doing anything
-		if self.dispense_no <= 0 or self.is_calibrating:
+		# If we are calibrating, recovering or not dispensing, we are not doing anything
+		if self.dispense_no <= 0 or self.is_calibrating or self.is_recovery:
 			return
 
 		if (datetime.now(timezone.utc) - self.last_dispense_time) > T_JAM:
@@ -284,7 +290,7 @@ class Dispenser(JobRunner):
 			self.is_recovery = True
 			self.set_motor(MOTOR_REVERSE)
 			logger.error(f'Jam after {self.current_dispense_no} coins, recovering...')
-			JobOnce(self.recovery_done, seconds = 0.4)
+			JobOnce(self.recovery_done, seconds = 0.5)
 
 	@Job(milliseconds = 4, align = True)
 	def job_check_rotor(self):
