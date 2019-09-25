@@ -73,7 +73,7 @@ class Dispenser(JobRunner):
 	is_closed = False
 	previous_ir_state = 0
 	previous_edge_time = None
-	last_dispense_time = None
+	last_rotate_time = datetime.now(timezone.utc)
 	empty_count = 0
 
 	# Different watches
@@ -266,26 +266,29 @@ class Dispenser(JobRunner):
 		logger.info('Aligning rotor')
 		self.is_calibrating = True
 		self.previous_edge_time = None
+		self.last_rotate_time = datetime.now(timezone.utc)
 		self.set_motor(MOTOR_ON)
 
 
 	def recovery_done(self):
-		c = self.current_dispense_no
+		if self.dispense_no > 0:
+			# Dispense the same amount
+			# But jump forward in the amount currently dispensed ;)
+			c = self.current_dispense_no
+			self.dispense(self.dispense_no)
+			self.current_dispense_no = c
+		elif self.is_calibrating:
+			self.align_rotor()
 
-		# Dispense the same amount
-		self.dispense(self.dispense_no)
-
-		# But jump forward in the amount currently dispensed ;)
-		self.current_dispense_no = c
 		self.is_recovery = False
 
 	@Job(seconds = 1, align = True)
 	def job_check_rotor_recovery(self):
 		# If we are calibrating, recovering or not dispensing, we are not doing anything
-		if self.dispense_no <= 0 or self.is_calibrating or self.is_recovery:
+		if self.motor_speed == MOTOR_OFF:
 			return
 
-		if (datetime.now(timezone.utc) - self.last_dispense_time) > T_JAM:
+		if (datetime.now(timezone.utc) - self.last_rotate_time) > T_JAM:
 			# Recovery mode
 			self.is_recovery = True
 			self.set_motor(MOTOR_REVERSE)
@@ -335,7 +338,7 @@ class Dispenser(JobRunner):
 	def on_half_rotation(self, has_coin):
 		logger.info(f'Half rotation and coin presence is {has_coin}')
 
-		self.last_dispense_time = datetime.now(timezone.utc)
+		self.last_rotate_time = datetime.now(timezone.utc)
 
 		if self.is_calibrating:
 			self.is_calibrating = False
@@ -355,7 +358,9 @@ class Dispenser(JobRunner):
 			self.current_dispense_no += 1
 
 			logger.info(f'Dispensed {self.current_dispense_no:d}')
-			if self.empty_count >= 3 or self.current_dispense_no >= self.dispense_no:
+
+			# self.empty_count >= 3 or
+			if self.current_dispense_no >= self.dispense_no:
 				self.dispense_done(self.current_dispense_no)
 
 
@@ -530,7 +535,7 @@ class Dispenser(JobRunner):
 		self.dispense_no = amount
 		self.current_dispense_no = 0
 		self.previous_edge_time = None
-		self.last_dispense_time = datetime.now(timezone.utc)
+		self.last_rotate_time = datetime.now(timezone.utc)
 
 		# Start the motor
 		self.set_motor(MOTOR_ON)
