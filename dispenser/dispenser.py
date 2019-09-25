@@ -493,14 +493,18 @@ class Dispenser(JobRunner):
 
 		logger.info(f'Checkout for {uid} with credit {self.players[uid]["credit"]}')
 
-		if self.players[uid]['credit'] <= 0:
-			self.set_led_flash('reader', 10, 0.05, HIGH)
-		else:
-			self.current_uid = uid
-			self.dispense(self.players[uid]['credit'])
-
 		# Flag the player locally to not present to avoid giving more money
 		self.players[uid]['present'] = False
+		self.current_uid = uid
+
+		if self.players[uid]['credit'] <= 0:
+			self.set_led_flash('reader', 10, 0.05, HIGH)
+
+			# We trigger dispense done of zero, this will nicely handle player checkout
+			self.dispense_done(0)
+		else:
+			self.dispense(self.players[uid]['credit'])
+
 
 	def set_motor(self, speed: int):
 		self.motor_speed = speed
@@ -544,10 +548,10 @@ class Dispenser(JobRunner):
 
 	def dispense_done(self, amount):
 		# Cleanup and turnoff the LED
-		# By going a bit longer, we always make a nice half turn
 		self.set_motor(MOTOR_OFF)
-		JobOnce(lambda: self.set_led('holder', LOW), seconds = 3)
-		JobOnce(lambda: self.set_led('reader', HIGH), seconds = 3)
+		if amount > 0:
+			JobOnce(lambda: self.set_led('holder', LOW), seconds = 3)
+			JobOnce(lambda: self.set_led('reader', HIGH), seconds = 3)
 
 		# Notify server of departure
 		# Raise a flag that we are empty
